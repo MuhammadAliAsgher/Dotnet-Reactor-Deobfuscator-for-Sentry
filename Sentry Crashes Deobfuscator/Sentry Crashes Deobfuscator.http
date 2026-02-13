@@ -1,0 +1,6 @@
+@Sentry_Crashes_Deobfuscator_HostAddress = http://localhost:5270
+
+GET {{Sentry_Crashes_Deobfuscator_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
