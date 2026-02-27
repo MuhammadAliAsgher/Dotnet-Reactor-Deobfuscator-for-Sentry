@@ -1,8 +1,10 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Sentry_Crashes_Deobfuscator.Repositories;
 using Sentry_Crashes_Deobfuscator.Services;
 using System.IO.Compression;
 using System.Text;
+using System.Security.Cryptography;
 
 namespace Sentry_Crashes_Deobfuscator.Controllers
 {
@@ -17,6 +19,8 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         private readonly string _realDsn;
         private readonly string _realPublicKey;
         private readonly string _realProjectId;
+        private readonly string _loginSalt;
+        private readonly IConfiguration _configuration;
 
         public SentryDeobfuscationController(
             IHttpClientFactory clientFactory,
@@ -29,8 +33,20 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
             _logger = logger;
             _mappingRepository = mappingRepository;
             _deobfuscationService = deobfuscationService;
+            _configuration = config;
 
             _realDsn = config["Sentry:RealDsn"] ?? throw new InvalidOperationException("Sentry:RealDsn missing");
+            
+            // Get LoginSalt from config or use default (same as Dark Web Monitoring)
+            var saltConfig = config["Authentication:LoginSalt"];
+            if (!string.IsNullOrEmpty(saltConfig))
+            {
+                _loginSalt = System.Text.Encoding.ASCII.GetString(Convert.FromBase64String(saltConfig)).Split(',')[0];
+            }
+            else
+            {
+                _loginSalt = System.Text.Encoding.ASCII.GetString(Convert.FromBase64String("a0tVUjlLWiF7Ki9ZdEI/Xixq")).Split(',')[0];
+            }
 
             var uri = new Uri(_realDsn);
             _realProjectId = uri.AbsolutePath.TrimStart('/');
@@ -52,11 +68,80 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         }
 
         /// <summary>
+        /// Validate MD5 hash authentication
+        /// </summary>
+        private bool ValidateAuthentication(string deviceId)
+        {
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                return false;
+            }
+
+            if (!Request.Headers.TryGetValue("Token", out var tokenHeader))
+            {
+                _logger.LogWarning("Missing Token header");
+                return false;
+            }
+
+            var expectedHash = ComputeMD5Hash(_loginSalt + deviceId);
+            var providedHash = tokenHeader.ToString();
+
+            var isValid = string.Equals(expectedHash, providedHash, StringComparison.OrdinalIgnoreCase);
+            
+            if (!isValid)
+            {
+                _logger.LogWarning("Authentication failed. Expected: {Expected}, Provided: {Provided}", 
+                    expectedHash, providedHash);
+            }
+
+            return isValid;
+        }
+
+        /// <summary>
+        /// Compute MD5 hash
+        /// </summary>
+        private string ComputeMD5Hash(string input)
+        {
+            using (var md5 = MD5.Create())
+            {
+                byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+                byte[] hashBytes = md5.ComputeHash(inputBytes);
+
+                StringBuilder sb = new StringBuilder();
+                foreach (byte b in hashBytes)
+                {
+                    sb.Append(b.ToString("x2"));
+                }
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>
         /// Handle Sentry envelope POST requests
         /// </summary>
         [HttpPost("envelope/{**catchall}")]
         public async Task<IActionResult> HandleEnvelope(string projectId, string? catchall = null)
         {
+            // Extract deviceId from query string or headers
+            var deviceId = Request.Query["device_id"].ToString();
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                deviceId = Request.Headers["X-Device-Id"].ToString();
+            }
+
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                _logger.LogWarning("Missing device_id in request");
+                return Unauthorized(new { message = "Missing device_id" });
+            }
+
+            // Validate MD5 hash authentication
+            if (!ValidateAuthentication(deviceId))
+            {
+                _logger.LogWarning("Authentication failed for device_id: {DeviceId}", deviceId);
+                return Unauthorized(new { message = "Invalid authentication token" });
+            }
+
             _logger.LogInformation("Received Sentry envelope: {Size} bytes", Request.ContentLength ?? 0);
 
             // Read raw body
@@ -101,6 +186,7 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         }
 
         [HttpGet("mappings")]
+        [AllowAnonymous]
         public IActionResult GetMappings()
         {
             var stats = _mappingRepository.GetAssemblyStats();
@@ -118,6 +204,7 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         }
 
         [HttpGet("health")]
+        [AllowAnonymous]
         public IActionResult Health()
         {
             var stats = _mappingRepository.GetAssemblyStats();
