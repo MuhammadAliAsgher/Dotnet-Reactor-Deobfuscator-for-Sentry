@@ -50,7 +50,6 @@ if (app.Environment.IsDevelopment())
     app.UseDeveloperExceptionPage();
 }
 
-app.UseAuthorization();
 app.MapControllers();
 
 logger.LogInformation("Proxy is ready. Listening for Sentry envelopes...");
