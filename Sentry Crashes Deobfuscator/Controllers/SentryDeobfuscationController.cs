@@ -19,8 +19,9 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         private readonly string _realDsn;
         private readonly string _realPublicKey;
         private readonly string _realProjectId;
-        private readonly string _loginSalt;
-        private readonly IConfiguration _configuration;
+        private readonly string _realIngestHost;
+        private readonly string _apiKey;
+        private readonly string _placeholderPublicKey;
 
         public SentryDeobfuscationController(
             IHttpClientFactory clientFactory,
@@ -33,24 +34,21 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
             _logger = logger;
             _mappingRepository = mappingRepository;
             _deobfuscationService = deobfuscationService;
-            _configuration = config;
 
-            _realDsn = config["Sentry:RealDsn"] ?? throw new InvalidOperationException("Sentry:RealDsn missing");
-            
-            // Get LoginSalt from config or use default (same as Dark Web Monitoring)
-            var saltConfig = config["Authentication:LoginSalt"];
-            if (!string.IsNullOrEmpty(saltConfig))
-            {
-                _loginSalt = System.Text.Encoding.ASCII.GetString(Convert.FromBase64String(saltConfig)).Split(',')[0];
-            }
-            else
-            {
-                _loginSalt = System.Text.Encoding.ASCII.GetString(Convert.FromBase64String("ROTATED-SECRET-REMOVED-FROM-HISTORY")).Split(',')[0];
-            }
+            var realDsn = config["Sentry:RealDsn"];
+            if (string.IsNullOrEmpty(realDsn)) throw new InvalidOperationException("Sentry:RealDsn missing");
+            _realDsn = realDsn;
+
+            var apiKey = config["Authentication:ApiKey"];
+            if (string.IsNullOrEmpty(apiKey)) throw new InvalidOperationException("Authentication:ApiKey missing");
+            _apiKey = apiKey;
+
+            _placeholderPublicKey = config["Sentry:PlaceholderPublicKey"] ?? "fakekey1234567890abcdef1234567890ab";
 
             var uri = new Uri(_realDsn);
             _realProjectId = uri.AbsolutePath.TrimStart('/');
             _realPublicKey = uri.UserInfo;
+            _realIngestHost = uri.Host;
 
             LogConfiguration();
         }
@@ -68,52 +66,29 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         }
 
         /// <summary>
-        /// Validate MD5 hash authentication
+        /// Constant-time API key check against the "Authorization: Bearer {key}" header.
         /// </summary>
-        private bool ValidateAuthentication(string deviceId)
+        private bool ValidateAuthentication()
         {
-            if (string.IsNullOrEmpty(deviceId))
+            if (!Request.Headers.TryGetValue("Authorization", out var authHeader))
             {
+                _logger.LogWarning("Missing Authorization header");
                 return false;
             }
 
-            if (!Request.Headers.TryGetValue("Token", out var tokenHeader))
+            var provided = authHeader.ToString();
+            const string prefix = "Bearer ";
+            if (!provided.StartsWith(prefix, StringComparison.Ordinal))
             {
-                _logger.LogWarning("Missing Token header");
                 return false;
             }
+            provided = provided[prefix.Length..];
 
-            var expectedHash = ComputeMD5Hash(_loginSalt + deviceId);
-            var providedHash = tokenHeader.ToString();
+            var expectedBytes = Encoding.UTF8.GetBytes(_apiKey);
+            var providedBytes = Encoding.UTF8.GetBytes(provided);
 
-            var isValid = string.Equals(expectedHash, providedHash, StringComparison.OrdinalIgnoreCase);
-            
-            if (!isValid)
-            {
-                _logger.LogWarning("Authentication failed. Expected: {Expected}, Provided: {Provided}", 
-                    expectedHash, providedHash);
-            }
-
-            return isValid;
-        }
-
-        /// <summary>
-        /// Compute MD5 hash
-        /// </summary>
-        private string ComputeMD5Hash(string input)
-        {
-            using (var md5 = MD5.Create())
-            {
-                byte[] inputBytes = Encoding.UTF8.GetBytes(input);
-                byte[] hashBytes = md5.ComputeHash(inputBytes);
-
-                StringBuilder sb = new StringBuilder();
-                foreach (byte b in hashBytes)
-                {
-                    sb.Append(b.ToString("x2"));
-                }
-                return sb.ToString();
-            }
+            return expectedBytes.Length == providedBytes.Length
+                && CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
         }
 
         /// <summary>
@@ -122,24 +97,10 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         [HttpPost("envelope/{**catchall}")]
         public async Task<IActionResult> HandleEnvelope(string projectId, string? catchall = null)
         {
-            // Extract deviceId from query string or headers
-            var deviceId = Request.Query["device_id"].ToString();
-            if (string.IsNullOrEmpty(deviceId))
+            if (!ValidateAuthentication())
             {
-                deviceId = Request.Headers["X-Device-Id"].ToString();
-            }
-
-            if (string.IsNullOrEmpty(deviceId))
-            {
-                _logger.LogWarning("Missing device_id in request");
-                return Unauthorized(new { message = "Missing device_id" });
-            }
-
-            // Validate MD5 hash authentication
-            if (!ValidateAuthentication(deviceId))
-            {
-                _logger.LogWarning("Authentication failed for device_id: {DeviceId}", deviceId);
-                return Unauthorized(new { message = "Invalid authentication token" });
+                _logger.LogWarning("Authentication failed");
+                return Unauthorized(new { message = "Invalid or missing API key" });
             }
 
             _logger.LogInformation("Received Sentry envelope: {Size} bytes", Request.ContentLength ?? 0);
@@ -245,7 +206,7 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         private string ReplaceFakePublicKey(string envelopeText)
         {
             var updated = envelopeText.Replace(
-                "\"public_key\":\"fakekey1234567890abcdef1234567890ab\"",
+                $"\"public_key\":\"{_placeholderPublicKey}\"",
                 $"\"public_key\":\"{_realPublicKey}\"",
                 StringComparison.OrdinalIgnoreCase
             );
@@ -263,7 +224,7 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
                 content.Headers.ContentEncoding.Add("gzip");
             }
 
-            var realUrl = $"https://o4510792744239104.ingest.us.sentry.io/api/{_realProjectId}/envelope/";
+            var realUrl = $"https://{_realIngestHost}/api/{_realProjectId}/envelope/";
 
             try
             {
@@ -295,10 +256,5 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         }
 
         #endregion
-    }
-
-    public class TestDeobfuscateRequest
-    {
-        public string ObfuscatedName { get; set; } = "";
     }
 }
