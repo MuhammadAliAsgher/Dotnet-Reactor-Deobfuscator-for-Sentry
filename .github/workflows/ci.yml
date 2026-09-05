@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore "Sentry Crashes Deobfuscator.sln"
+      - name: Build
+        run: dotnet build "Sentry Crashes Deobfuscator.sln" --no-restore --configuration Release
+      - name: Test
+        run: dotnet test "Sentry Crashes Deobfuscator.sln" --no-build --configuration Release --logger "trx;LogFileName=test-results.trx"
