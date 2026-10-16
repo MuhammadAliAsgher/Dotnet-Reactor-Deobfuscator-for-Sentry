@@ -14,7 +14,7 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
     {
         private readonly IHttpClientFactory _clientFactory;
         private readonly ILogger<SentryDeobfuscationController> _logger;
-        private readonly IMappingRepository _mappingRepository;
+        private readonly ITenantMappingCache _tenantMappingCache;
         private readonly IDeobfuscationService _deobfuscationService;
         private readonly string _realDsn;
         private readonly string _realPublicKey;
@@ -27,12 +27,12 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
             IHttpClientFactory clientFactory,
             IConfiguration config,
             ILogger<SentryDeobfuscationController> logger,
-            IMappingRepository mappingRepository,
+            ITenantMappingCache tenantMappingCache,
             IDeobfuscationService deobfuscationService)
         {
             _clientFactory = clientFactory;
             _logger = logger;
-            _mappingRepository = mappingRepository;
+            _tenantMappingCache = tenantMappingCache;
             _deobfuscationService = deobfuscationService;
 
             var realDsn = config["Sentry:RealDsn"];
@@ -55,14 +55,8 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
 
         private void LogConfiguration()
         {
-            _logger.LogInformation("Sentry Deobfuscation Proxy Ready");
-            _logger.LogInformation("Real Project ID: {ProjectId}, Mappings: {Count}", 
-                _realProjectId, _mappingRepository.TotalMappings);
-
-            if (!_mappingRepository.HasMappings)
-            {
-                _logger.LogError("WARNING: ZERO MAPPINGS LOADED! Deobfuscation will NOT work!");
-            }
+            _logger.LogInformation("Sentry Deobfuscation Proxy Ready (multi-tenant, per-request .nrmap resolution)");
+            _logger.LogInformation("Real Project ID: {ProjectId}", _realProjectId);
         }
 
         /// <summary>
@@ -121,19 +115,14 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
             // Replace fake public key with real one
             envelopeText = ReplaceFakePublicKey(envelopeText);
 
-            // Deobfuscate stack traces
-            if (_mappingRepository.HasMappings)
-            {
-                envelopeText = _deobfuscationService.DeobfuscateEnvelope(envelopeText);
+            // Deobfuscate stack traces. Mapping resolution is now per-tenant and per-request
+            // (Project.md §3) -- a tenant with no cached/stored .nrmap falls through to the
+            // §3.4 fallback inside the service and the envelope passes through unchanged.
+            envelopeText = _deobfuscationService.DeobfuscateEnvelope(envelopeText);
 
-                var stats = _deobfuscationService.GetLastStats();
-                _logger.LogInformation("Deobfuscation: {Deobf} deobfuscated, {Skip} skipped, {Fail} failed",
-                    stats.FramesDeobfuscated, stats.FramesSkipped, stats.FramesFailed);
-            }
-            else
-            {
-                _logger.LogWarning("Skipping deobfuscation - No mappings loaded");
-            }
+            var stats = _deobfuscationService.GetLastStats();
+            _logger.LogInformation("Deobfuscation: {Deobf} deobfuscated, {Skip} skipped, {Fail} failed",
+                stats.FramesDeobfuscated, stats.FramesSkipped, stats.FramesFailed);
 
             // Re-compress if needed
             byte[] finalBytes = isGzipped
@@ -150,17 +139,12 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         [AllowAnonymous]
         public IActionResult GetMappings()
         {
-            var stats = _mappingRepository.GetAssemblyStats();
-
             return Ok(new
             {
-                totalMappings = _mappingRepository.TotalMappings,
-                assemblies = stats.Select(kvp => new
-                {
-                    assembly = kvp.Key,
-                    methodCount = kvp.Value
-                }).ToList(),
-                status = _mappingRepository.HasMappings ? "OK" : "ERROR - No mappings loaded"
+                architecture = "multi-tenant: .nrmap resolved per {product}:{release} tenant key, LRU+TTL cached (Project.md §3)",
+                cachedTenants = _tenantMappingCache.CachedTenantCount,
+                note = "Per-tenant hit/miss/unresolved counts are exposed via Prometheus at /metrics " +
+                       "(deobfuscator_cache_hit_total, deobfuscator_cache_miss_total, deobfuscator_unresolved_total), not here."
             });
         }
 
@@ -168,16 +152,11 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         [AllowAnonymous]
         public IActionResult Health()
         {
-            var stats = _mappingRepository.GetAssemblyStats();
-            var isHealthy = _mappingRepository.HasMappings;
-
             return Ok(new
             {
-                status = isHealthy ? "healthy" : "unhealthy",
+                status = "healthy",
                 proxyFor = _realProjectId,
-                mappingsLoaded = _mappingRepository.TotalMappings,
-                assemblies = stats,
-                warnings = !isHealthy ? new[] { "No mapping files loaded - deobfuscation will not work!" } : Array.Empty<string>()
+                cachedTenants = _tenantMappingCache.CachedTenantCount
             });
         }
 

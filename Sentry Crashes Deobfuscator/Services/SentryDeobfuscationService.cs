@@ -1,4 +1,5 @@
-﻿using Sentry_Crashes_Deobfuscator.Repositories;
+﻿using Sentry_Crashes_Deobfuscator.Observability;
+using Sentry_Crashes_Deobfuscator.Repositories;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -7,15 +8,20 @@ namespace Sentry_Crashes_Deobfuscator.Services
 {
     public class SentryDeobfuscationService : IDeobfuscationService
     {
-        private readonly IMappingRepository _mappingRepository;
+        private const string UnknownProduct = "unknown";
+
+        private readonly ITenantMappingCache _tenantMappingCache;
+        private readonly SymbolResolverMetrics _metrics;
         private readonly ILogger<SentryDeobfuscationService> _logger;
         private DeobfuscationStats _lastStats = new();
 
         public SentryDeobfuscationService(
-            IMappingRepository mappingRepository,
+            ITenantMappingCache tenantMappingCache,
+            SymbolResolverMetrics metrics,
             ILogger<SentryDeobfuscationService> logger)
         {
-            _mappingRepository = mappingRepository;
+            _tenantMappingCache = tenantMappingCache;
+            _metrics = metrics;
             _logger = logger;
         }
 
@@ -38,27 +44,47 @@ namespace Sentry_Crashes_Deobfuscator.Services
                 string itemHeader = lines[1];
                 string itemPayload = lines[2];
 
+                JsonNode? json;
                 try
                 {
-                    var json = JsonNode.Parse(itemPayload);
-                    if (json != null)
-                    {
-                        DeobfuscateEventPayload(json);
-
-                        itemPayload = json.ToJsonString();
-
-                        var itemHeaderJson = JsonNode.Parse(itemHeader);
-                        if (itemHeaderJson != null && itemHeaderJson["length"] != null)
-                        {
-                            itemHeaderJson["length"] = Encoding.UTF8.GetByteCount(itemPayload);
-                            itemHeader = itemHeaderJson.ToJsonString();
-                        }
-                    }
+                    json = JsonNode.Parse(itemPayload);
                 }
                 catch (JsonException ex)
                 {
                     _logger.LogWarning(ex, "Failed to parse JSON payload");
+                    _metrics.RecordResolutionError(UnknownProduct, nameof(JsonException));
                     return envelopeText;
+                }
+
+                if (json == null)
+                {
+                    return envelopeText;
+                }
+
+                // Tenant key resolution (Project.md §3.1) -- never guess. A missing
+                // product/release falls through to the §3.4 fallback: forward unchanged.
+                if (!TenantKeyResolver.TryResolve(json, out var product, out var release, out _))
+                {
+                    _logger.LogWarning("tenant_key_resolution_failed: event carries no resolvable product/release");
+                    return envelopeText;
+                }
+
+                if (!_tenantMappingCache.TryGet(product!, release!, out var mappingRepository) || mappingRepository == null)
+                {
+                    // §3.4 fallback: no .nrmap for this tenant. Forward the raw trace unchanged,
+                    // never drop or fail the request.
+                    return envelopeText;
+                }
+
+                DeobfuscateEventPayload(json, mappingRepository);
+
+                itemPayload = json.ToJsonString();
+
+                var itemHeaderJson = JsonNode.Parse(itemHeader);
+                if (itemHeaderJson != null && itemHeaderJson["length"] != null)
+                {
+                    itemHeaderJson["length"] = Encoding.UTF8.GetByteCount(itemPayload);
+                    itemHeader = itemHeaderJson.ToJsonString();
                 }
 
                 return $"{envelopeHeader}\n{itemHeader}\n{itemPayload}";
@@ -66,11 +92,12 @@ namespace Sentry_Crashes_Deobfuscator.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to deobfuscate envelope");
+                _metrics.RecordResolutionError(UnknownProduct, ex.GetType().Name);
                 return envelopeText;
             }
         }
 
-        private void DeobfuscateEventPayload(JsonNode eventJson)
+        private void DeobfuscateEventPayload(JsonNode eventJson, IMappingRepository mappingRepository)
         {
             var exceptions = eventJson["exception"]?["values"]?.AsArray();
             if (exceptions == null)
@@ -91,7 +118,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
                     var frame = frames[i];
                     if (frame == null) continue;
 
-                    var result = DeobfuscateStackFrame(frame);
+                    var result = DeobfuscateStackFrame(frame, mappingRepository);
 
                     switch (result)
                     {
@@ -116,7 +143,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
             Failed
         }
 
-        private FrameResult DeobfuscateStackFrame(JsonNode frame)
+        private FrameResult DeobfuscateStackFrame(JsonNode frame, IMappingRepository mappingRepository)
         {
             var functionStr = frame["function"]?.GetValue<string>();
 
@@ -160,7 +187,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
             {
                 var key1 = $"{assemblyName}_{assemblyVersion}:{typeName}.{methodName}";
 
-                if (_mappingRepository.TryDeobfuscateMethod(key1, out var result1))
+                if (mappingRepository.TryDeobfuscateMethod(key1, out var result1))
                 {
                     ParseDeobfuscatedResult(result1, out originalType, out originalMethod);
                     found = true;
@@ -172,7 +199,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
             {
                 var key2 = $"{typeName}.{methodName}";
 
-                if (_mappingRepository.TryDeobfuscateMethod(key2, out var result2))
+                if (mappingRepository.TryDeobfuscateMethod(key2, out var result2))
                 {
                     ParseDeobfuscatedResult(result2, out originalType, out originalMethod);
                     found = true;
@@ -184,7 +211,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
             {
                 var key3 = methodName;
 
-                if (_mappingRepository.TryDeobfuscateMethod(key3, out var result3))
+                if (mappingRepository.TryDeobfuscateMethod(key3, out var result3))
                 {
                     ParseDeobfuscatedResult(result3, out originalType, out originalMethod);
                     found = true;
@@ -194,13 +221,13 @@ namespace Sentry_Crashes_Deobfuscator.Services
             // Strategy 4: Try type separately
             if (!found && !string.IsNullOrEmpty(typeName))
             {
-                if (_mappingRepository.TryDeobfuscateType(typeName, out var deobfType))
+                if (mappingRepository.TryDeobfuscateType(typeName, out var deobfType))
                 {
                     originalType = deobfType;
 
                     var key4 = $"{deobfType}.{methodName}";
 
-                    if (_mappingRepository.TryDeobfuscateMethod(key4, out var result4))
+                    if (mappingRepository.TryDeobfuscateMethod(key4, out var result4))
                     {
                         ParseDeobfuscatedResult(result4, out originalType, out originalMethod);
                         found = true;
@@ -283,7 +310,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
                 }
 
                 frame["function"] = newFunction;
-                
+
                 _logger.LogDebug("Deobfuscated: {Original} → {New}", originalFunctionStr, newFunction);
             }
         }
