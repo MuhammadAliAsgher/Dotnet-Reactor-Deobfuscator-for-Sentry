@@ -20,7 +20,7 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
 
             release = eventJson["release"]?.GetValue<string>();
 
-            if (string.IsNullOrWhiteSpace(product) || string.IsNullOrWhiteSpace(release))
+            if (!IsSafeSegment(product) || !IsSafeSegment(release))
             {
                 product = null;
                 release = null;
@@ -31,6 +31,16 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
             tenantKey = $"{product}:{release}";
             return true;
         }
+
+        /// <summary>
+        /// Product and release become path segments in the blob store, so anything that
+        /// could escape the store directory (separators, "..", leading dot, odd characters) is rejected.
+        /// </summary>
+        public static bool IsSafeSegment(string? segment) =>
+            segment != null && SafeSegment.IsMatch(segment) && !segment.Contains("..");
+
+        private static readonly System.Text.RegularExpressions.Regex SafeSegment =
+            new(@"^[A-Za-z0-9][A-Za-z0-9._+@-]{0,127}$");
 
         /// <summary>
         /// Sentry's "tags" field has shipped as both an object map and an array of

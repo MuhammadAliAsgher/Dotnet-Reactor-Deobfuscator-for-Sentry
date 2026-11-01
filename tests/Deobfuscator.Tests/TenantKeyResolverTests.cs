@@ -19,6 +19,22 @@ namespace Deobfuscator.Tests
             Assert.Equal("demo-app:1.4.2", tenantKey);
         }
 
+        [Theory]
+        [InlineData("..", "1.4.2")]
+        [InlineData("demo-app", "../../secret")]
+        [InlineData("demo\\..\\x", "1.4.2")]
+        [InlineData("/etc", "1.4.2")]
+        [InlineData(".hidden", "1.4.2")]
+        public void TryResolve_PathTraversalInSegments_Rejected(string product, string release)
+        {
+            var json = new JsonObject { ["project"] = product, ["release"] = release };
+
+            var resolved = TenantKeyResolver.TryResolve(json, out _, out _, out var tenantKey);
+
+            Assert.False(resolved);
+            Assert.Null(tenantKey);
+        }
+
         [Fact]
         public void TryResolve_ProjectMissing_FallsBackToProductTagObjectForm()
         {

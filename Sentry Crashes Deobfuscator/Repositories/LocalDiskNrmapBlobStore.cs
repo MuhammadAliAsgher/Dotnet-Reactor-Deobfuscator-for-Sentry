@@ -12,7 +12,19 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
 
         public string? TryResolve(string product, string release)
         {
-            var path = Path.Combine(_rootPath, product, $"{release}.nrmap");
+            if (!TenantKeyResolver.IsSafeSegment(product) || !TenantKeyResolver.IsSafeSegment(release))
+            {
+                return null;
+            }
+
+            var root = Path.GetFullPath(_rootPath) + Path.DirectorySeparatorChar;
+            var path = Path.GetFullPath(Path.Combine(root, product, $"{release}.nrmap"));
+
+            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
             return File.Exists(path) ? path : null;
         }
     }
