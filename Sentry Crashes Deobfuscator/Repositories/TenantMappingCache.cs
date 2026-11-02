@@ -39,12 +39,19 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
             var tenantKey = $"{product}:{release}";
             var stopwatch = Stopwatch.StartNew();
 
-            if (_cache.TryGetValue(tenantKey, out IMappingRepository? cached))
+            if (_cache.TryGetValue(tenantKey, out CacheEntry? cached) && cached != null)
             {
-                repository = cached;
-                _metrics.RecordCacheHit(product);
-                _metrics.RecordResolutionDuration(product, "hit", stopwatch.Elapsed.TotalSeconds);
-                return true;
+                // A rebuilt/overwritten .nrmap must not be served stale: reload when the file changed.
+                if (File.GetLastWriteTimeUtc(cached.Path) == cached.LastWriteUtc)
+                {
+                    repository = cached.Repository;
+                    _metrics.RecordCacheHit(product);
+                    _metrics.RecordResolutionDuration(product, "hit", stopwatch.Elapsed.TotalSeconds);
+                    return true;
+                }
+
+                _logger.LogWarning("nrmap_changed: {TenantKey} file modified since it was cached, reloading", tenantKey);
+                _cache.Remove(tenantKey);
             }
 
             _metrics.RecordCacheMiss(product);
@@ -62,7 +69,7 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
             var loaded = new NRMapRepository(_loggerFactory.CreateLogger<NRMapRepository>());
             loaded.LoadMappings(path);
 
-            _cache.Set<IMappingRepository>(tenantKey, loaded, new MemoryCacheEntryOptions
+            _cache.Set(tenantKey, new CacheEntry(loaded, path, File.GetLastWriteTimeUtc(path)), new MemoryCacheEntryOptions
             {
                 SlidingExpiration = _ttl,
                 Size = 1
@@ -72,6 +79,8 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
             _metrics.RecordResolutionDuration(product, "miss", stopwatch.Elapsed.TotalSeconds);
             return true;
         }
+
+        private sealed record CacheEntry(IMappingRepository Repository, string Path, DateTime LastWriteUtc);
 
         public void Dispose() => _cache.Dispose();
     }

@@ -83,5 +83,32 @@ namespace Deobfuscator.Tests
             Assert.NotSame(first, second); // distinct tenant keys get distinct repository instances
             Assert.Equal(2, cache.CachedTenantCount);
         }
+
+        [Fact]
+        public void TryGet_FileOverwrittenAfterCaching_ReloadsNewContent()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "nrmap-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var path = Path.Combine(dir, "1.0.nrmap");
+                var fixture = Path.Combine(AppContext.BaseDirectory, "Fixtures", "sample.nrmap");
+                File.WriteAllLines(path, new[] { "<<type>>", "Aaaa", "Old.Type", "Aa", "PAD", "m1m1m1m1", "OldMethod" });
+                var blobStore = new FakeBlobStore();
+                blobStore.SetPath("demo-app", "1.0", path);
+                var cache = BuildCache(blobStore);
+
+                cache.TryGet("demo-app", "1.0", out var first);
+                Assert.True(first!.TryDeobfuscateMethod("m1m1m1m1", out _));
+
+                File.Copy(fixture, path, overwrite: true);
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(5));
+
+                cache.TryGet("demo-app", "1.0", out var second);
+                Assert.NotSame(first, second);
+                Assert.True(second!.TryDeobfuscateMethod("Xk9Qz2Wp.a1b2c3d4", out _));
+            }
+            finally { Directory.Delete(dir, recursive: true); }
+        }
     }
 }
