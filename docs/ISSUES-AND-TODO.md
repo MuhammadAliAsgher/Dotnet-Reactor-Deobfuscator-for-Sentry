@@ -1,6 +1,6 @@
 # Issues and TODO
 
-Last updated: 2026-11-02. Found while testing the proxy against a test app and a local load test. Status: OPEN unless marked DONE.
+Last updated: 2026-11-03. Found while testing the proxy against a test app and a local load test. Status: OPEN unless marked DONE.
 
 ## Known issues
 
@@ -16,6 +16,15 @@ Last updated: 2026-11-02. Found while testing the proxy against a test app and a
 10. **Security advisories (DONE).** `System.Text.Json` 8.0.0 and `Microsoft.Extensions.Caching.Memory` 8.0.0 had NU1903 advisories. Bumped to 8.0.5 and 8.0.1.
 11. **Stale cached map after a map file was replaced (DONE).** A cached tenant kept an old map, so frames stayed obfuscated after the map was rebuilt. The cache now compares the file's last-write time on each hit and reloads when it changes (`nrmap_changed` warning).
 12. **Lambda frames were mangled (DONE).** `void <>c.NTr7cETsf9()` became `<>Acme.App.Program/<>c...`. The function regex now accepts the `<>` prefix. A test covers it.
+13. **Duplicate obfuscated names resolve silently to the first entry (OPEN, medium).** Reactor can reuse one obfuscated name for several methods of the same signature inside one type. In a real merged map, `F78CpkZSgR` is the obfuscated name of both `<RunSentryTestKind>b__40_4` and `<RunSentryTestKind>b__40_5` in the same `<>c` type. `NRMapRepository` keeps the first entry for the plain method, `Type.Method` and `Class.Method` keys (the assembly-qualified keys keep the last), so a crash in `b__40_5` is reported as `b__40_4` and nothing signals the guess. The name alone cannot tell them apart. Fix: record every candidate per key. When a frame matches more than one, leave it raw or show all candidates, and count it as a new `ambiguous` result in `deobfuscator_frames_total`. Add a test. Files: `Repositories/NRMapRepository.cs`, `Services/SentryDeobfuscationService.cs`, `Observability/SymbolResolverMetrics.cs`. Related to issue 7.
+14. **Map file name must equal the release string exactly (OPEN, medium).** The proxy reads `{MappingPath}/{product}/{release}.nrmap`, with the release taken from the event. A name that differs by even a suffix or case, for example `1.2.3.nrmap` against a release of `1.2.3-PRODUCTION(1)`, is never found, and the events are forwarded raw (counted as `unresolved`). Recommended fix, with no proxy change: the build or release script copies the merged map to `{product}/{release}.nrmap` using the same release string that the app sends to Sentry, and fails the build if the two disagree. Do not add fuzzy matching in the proxy, because it could pick the wrong map. Related TODO: automate the map copy.
+15. **Stale map risk when a version is re-obfuscated (OPEN, low).** If the obfuscation project does not overwrite its previous output, a second obfuscation of the same version can leave an old map next to a new binary. Confirm that the map was written after the binary that is being tested. The proxy only notices a map file that changes on disk.
+
+## Multi-version and multi-tenant test results (2026-11-02)
+
+- Synthetic: two products and three releases with maps that map the same obfuscated frame to different names. Each product and release resolved with its own map in the test Sentry project. A release with no map was forwarded raw and returned 200.
+- Real second build (release string with a new version): its frames came out readable in the test Sentry project. One lambda frame is ambiguous, see issue 13.
+- Some events under the earlier release came from a different, unobfuscated build of the same version, so they say nothing about the map. Record which binary sends which test event.
 
 ## Load test findings (2026-11-02)
 
@@ -29,7 +38,10 @@ Last updated: 2026-11-02. Found while testing the proxy against a test app and a
 - Fix issues 1 to 3 first (stampede, shared stats, failed-forward retry or queue).
 - Add per-product ClientKeys (issue 9) before a second app uses the proxy.
 - Repeat the load test on a quiet machine, with a stub that has no artificial delay, and record requests per second, p95 latency, and memory.
-- Rebuild the test app with obfuscation and confirm readable frames in the test Sentry project (the last confirmation was with a synthetic event).
+- Fix issue 13 (ambiguous duplicate names) before trusting lambda frames from a merged map.
+- Check the one remaining raw lambda frame in the second real build against its map (issue 13) and note which binary produced each test event.
+- Clean up the local repo: remove the pre-rewrite backup branch (it still holds real maps) and fast-forward local `main` to `origin/main`.
+- Ask GitHub support to purge cached views of the old commits that held real maps. Treat maps that were ever pushed as exposed.
 - Automate copying each release's merged `.nrmap` into `{MappingPath}/{product}/{release}.nrmap` at build or release time. Never commit a real `.nrmap`.
 - Add a Sentry or log alert on `deobfuscator_frames_total{result="unmatched"}` rising after a release.
 - Decide where to host production, and whether a single instance is enough (each instance keeps its own in-memory cache, see ADR-001). S3 blob store is documented but not built.
