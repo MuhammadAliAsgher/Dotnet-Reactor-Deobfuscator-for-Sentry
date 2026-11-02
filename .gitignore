@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# Real .NET Reactor maps never go in the repo (they undo the obfuscation). Test fixtures are synthetic.
+*.nrmap
+!tests/**/Fixtures/*.nrmap
