@@ -40,7 +40,7 @@ namespace Sentry_Crashes_Deobfuscator.Repositories
             segment != null && SafeSegment.IsMatch(segment) && !segment.Contains("..");
 
         private static readonly System.Text.RegularExpressions.Regex SafeSegment =
-            new(@"^[A-Za-z0-9][A-Za-z0-9._+@-]{0,127}$");
+            new(@"^[A-Za-z0-9][A-Za-z0-9._+@()-]{0,127}$");
 
         /// <summary>
         /// Sentry's "tags" field has shipped as both an object map and an array of
