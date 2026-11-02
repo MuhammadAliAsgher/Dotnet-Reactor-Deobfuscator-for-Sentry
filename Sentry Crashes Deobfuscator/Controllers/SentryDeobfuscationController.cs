@@ -22,6 +22,7 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         private readonly string _realIngestHost;
         private readonly string _apiKey;
         private readonly string _placeholderPublicKey;
+        private readonly string? _clientKey;
 
         public SentryDeobfuscationController(
             IHttpClientFactory clientFactory,
@@ -45,6 +46,9 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
 
             _placeholderPublicKey = config["Sentry:PlaceholderPublicKey"] ?? "fakekey1234567890abcdef1234567890ab";
 
+            _clientKey = config["Authentication:ClientKey"];
+            if (string.IsNullOrEmpty(_clientKey)) _clientKey = null;
+
             var uri = new Uri(_realDsn);
             _realProjectId = uri.AbsolutePath.TrimStart('/');
             _realPublicKey = uri.UserInfo;
@@ -60,29 +64,45 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
         }
 
         /// <summary>
-        /// Constant-time API key check against the "Authorization: Bearer {key}" header.
+        /// Accepts EITHER "Authorization: Bearer {ApiKey}" OR a Sentry DSN public key equal to
+        /// Authentication:ClientKey (X-Sentry-Auth "sentry_key=" or ?sentry_key=), for SDKs that
+        /// cannot add custom headers. Both compares are constant-time.
         /// </summary>
-        private bool ValidateAuthentication()
+        private bool ValidateAuthentication() => IsAuthorized(
+            Request.Headers["Authorization"].ToString(),
+            Request.Headers["X-Sentry-Auth"].ToString(),
+            Request.Query["sentry_key"].ToString(),
+            _apiKey, _clientKey);
+
+        public static bool IsAuthorized(string? authorization, string? xSentryAuth, string? querySentryKey,
+            string apiKey, string? clientKey)
         {
-            if (!Request.Headers.TryGetValue("Authorization", out var authHeader))
-            {
-                _logger.LogWarning("Missing Authorization header");
-                return false;
-            }
-
-            var provided = authHeader.ToString();
             const string prefix = "Bearer ";
-            if (!provided.StartsWith(prefix, StringComparison.Ordinal))
+            if (!string.IsNullOrEmpty(authorization)
+                && authorization.StartsWith(prefix, StringComparison.Ordinal)
+                && FixedEquals(apiKey, authorization[prefix.Length..]))
+                return true;
+
+            if (string.IsNullOrEmpty(clientKey)) return false;
+
+            var provided = querySentryKey;
+            if (string.IsNullOrEmpty(provided) && !string.IsNullOrEmpty(xSentryAuth))
             {
-                return false;
+                foreach (var part in xSentryAuth.Split(',', StringSplitOptions.TrimEntries))
+                {
+                    var kv = part.Replace("Sentry ", "", StringComparison.Ordinal).Trim();
+                    if (kv.StartsWith("sentry_key=", StringComparison.Ordinal))
+                        provided = kv["sentry_key=".Length..];
+                }
             }
-            provided = provided[prefix.Length..];
+            return !string.IsNullOrEmpty(provided) && FixedEquals(clientKey, provided);
+        }
 
-            var expectedBytes = Encoding.UTF8.GetBytes(_apiKey);
-            var providedBytes = Encoding.UTF8.GetBytes(provided);
-
-            return expectedBytes.Length == providedBytes.Length
-                && CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
+        private static bool FixedEquals(string expected, string provided)
+        {
+            var e = Encoding.UTF8.GetBytes(expected);
+            var p = Encoding.UTF8.GetBytes(provided);
+            return e.Length == p.Length && CryptographicOperations.FixedTimeEquals(e, p);
         }
 
         /// <summary>
@@ -189,6 +209,12 @@ namespace Sentry_Crashes_Deobfuscator.Controllers
                 $"\"public_key\":\"{_realPublicKey}\"",
                 StringComparison.OrdinalIgnoreCase
             );
+
+            if (_clientKey != null)
+                updated = updated.Replace(
+                    $"\"public_key\":\"{_clientKey}\"",
+                    $"\"public_key\":\"{_realPublicKey}\"",
+                    StringComparison.OrdinalIgnoreCase);
 
             return updated;
         }
