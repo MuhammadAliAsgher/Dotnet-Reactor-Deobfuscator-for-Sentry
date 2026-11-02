@@ -33,6 +33,13 @@ namespace Sentry_Crashes_Deobfuscator.Observability
             "Count of malformed input or resolver exceptions encountered during symbol resolution.",
             new CounterConfiguration { LabelNames = new[] { "product", "error_type" } });
 
+        private readonly Counter _frames = Prometheus.Metrics.CreateCounter(
+            "deobfuscator_frames_total",
+            "Stack frames seen by the resolver, by outcome: resolved, unmatched (looked obfuscated but no mapping entry), skipped (already readable).",
+            new CounterConfiguration { LabelNames = new[] { "product", "result" } });
+
+        public void RecordFrame(string product, string result) => _frames.WithLabels(product, result).Inc();
+
         public void RecordResolutionDuration(string product, string cacheResult, double seconds) =>
             _resolutionDuration.WithLabels(product, cacheResult).Observe(seconds);
 

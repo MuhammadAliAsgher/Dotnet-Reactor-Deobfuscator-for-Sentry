@@ -76,7 +76,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
                     return envelopeText;
                 }
 
-                DeobfuscateEventPayload(json, mappingRepository);
+                DeobfuscateEventPayload(json, mappingRepository, product!);
 
                 itemPayload = json.ToJsonString();
 
@@ -97,7 +97,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
             }
         }
 
-        private void DeobfuscateEventPayload(JsonNode eventJson, IMappingRepository mappingRepository)
+        private void DeobfuscateEventPayload(JsonNode eventJson, IMappingRepository mappingRepository, string product)
         {
             var exceptions = eventJson["exception"]?["values"]?.AsArray();
             if (exceptions == null)
@@ -124,12 +124,15 @@ namespace Sentry_Crashes_Deobfuscator.Services
                     {
                         case FrameResult.Deobfuscated:
                             _lastStats.FramesDeobfuscated++;
+                            _metrics.RecordFrame(product, "resolved");
                             break;
                         case FrameResult.Skipped:
                             _lastStats.FramesSkipped++;
+                            _metrics.RecordFrame(product, "skipped");
                             break;
                         case FrameResult.Failed:
                             _lastStats.FramesFailed++;
+                            _metrics.RecordFrame(product, "unmatched");
                             break;
                     }
                 }
@@ -250,7 +253,7 @@ namespace Sentry_Crashes_Deobfuscator.Services
         {
             var match = System.Text.RegularExpressions.Regex.Match(
                 functionStr,
-                @"(\w+)\.(\w+)\s*\("
+                @"((?:<>)?\w+)\.(\w+)\s*\(" // "<>c" = compiler-generated lambda class
             );
 
             if (match.Success)
