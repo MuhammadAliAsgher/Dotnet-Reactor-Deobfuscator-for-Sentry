@@ -1,5 +1,9 @@
 # Sentry Crashes Deobfuscator
 
+[![.NET](https://img.shields.io/badge/.NET-8.0-512BD4.svg?logo=dotnet)](https://dotnet.microsoft.com/download/dotnet/8.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/MuhammadAliAsgher/Dotnet-Reactor-Deobfuscator-for-Sentry/ci.yml?branch=main&logo=github-actions&label=CI)](https://github.com/MuhammadAliAsgher/Dotnet-Reactor-Deobfuscator-for-Sentry/actions/workflows/ci.yml)
+
 A standalone ingest proxy that sits between a .NET Reactor-obfuscated client app and Sentry. It resolves `.nrmap`-obfuscated type/method names in incoming crash envelopes back into their original, readable names before forwarding the envelope on to your real Sentry project.
 
 ## Why
@@ -13,7 +17,7 @@ Obfuscated client app
       │  POST /api/{projectId}/envelope/  (placeholder public key, obfuscated stack frames)
       ▼
 Sentry Crashes Deobfuscator (this proxy)
-      │  1. Authenticate the request (API key)
+      │  1. Authenticate the request (Bearer API key, or the DSN public key as a client key)
       │  2. Decompress the envelope if gzipped
       │  3. Swap the placeholder Sentry public key for the real one
       │  4. Resolve the event's tenant key ({product}:{release}) and look up its .nrmap
@@ -43,7 +47,7 @@ dotnet restore
 dotnet build
 ```
 
-Configure `appsettings.json` (or environment variables / `dotnet user-secrets` — never commit real values):
+Configure with environment variables or `dotnet user-secrets`. Keep real values out of `appsettings.json` and never commit them:
 
 | Key | Purpose |
 |---|---|
@@ -51,10 +55,11 @@ Configure `appsettings.json` (or environment variables / `dotnet user-secrets` �
 | `Sentry:MappingPath` | Root directory of the `.nrmap` blob store, laid out as `{root}/{product}/{release}.nrmap` — see **Multi-tenant mapping layout** below |
 | `Sentry:PlaceholderPublicKey` | The dummy Sentry public key your obfuscated client build ships with (default: `fakekey1234567890abcdef1234567890ab`) |
 | `Authentication:ApiKey` | Shared secret your client sends as `Authorization: Bearer <key>` |
+| `Authentication:ClientKey` | Optional. Lets an SDK that cannot send a Bearer header authenticate with the public key of its DSN (`X-Sentry-Auth` `sentry_key=` or `?sentry_key=`). The key ships inside the app, so this is weak authentication. One key is shared by every app that uses the proxy |
 | `Cache:NrmapTtlDays` | How long a tenant's mapping stays cached after its *last* access, not insertion (default: `30`) |
 | `Cache:NrmapMaxEntries` | Max tenants held in the cache at once; least-recently-used is evicted first past this (default: `50`) |
 
-Environment-variable equivalents (double underscore separates nesting): `Sentry__RealDsn`, `Sentry__MappingPath`, `Authentication__ApiKey`, `Cache__NrmapTtlDays`, `Cache__NrmapMaxEntries`.
+Environment-variable equivalents (double underscore separates nesting): `Sentry__RealDsn`, `Sentry__MappingPath`, `Authentication__ApiKey`, `Authentication__ClientKey`, `Cache__NrmapTtlDays`, `Cache__NrmapMaxEntries`.
 
 ```bash
 dotnet run --project "Sentry Crashes Deobfuscator"
@@ -66,7 +71,13 @@ The client app's Sentry DSN should point at this proxy instead of Sentry directl
 
 Each event's tenant key is `{product}:{release}` — `product` from the event's `project` field (or a `product` tag if the event doesn't carry one natively), `release` from the event's own `release` field. Resolution happens before any symbol work starts; a missing product or release is never guessed, it just means the event passes through unresolved.
 
-`.nrmap` files live at `{Sentry:MappingPath}/{product}/{release}.nrmap`, one per tenant, immutable once written — a release's obfuscation map never changes after that build ships. Never delete one automatically: a missing map for an old release is a support incident (users linger on old builds for weeks after a new release), not a disk-space optimization.
+`.nrmap` files live at `{Sentry:MappingPath}/{product}/{release}.nrmap`, one per tenant. A release's obfuscation map should not change after that build ships. Never delete one automatically: a missing map for an old release is a support incident (users linger on old builds for weeks after a new release), not a disk-space optimization.
+
+The file name must equal the event's release string exactly, including case and any suffix. For a release of `1.2.3-PRODUCTION(1)` the file is `1.2.3-PRODUCTION(1).nrmap`; `1.2.3.nrmap` is never found and the events are forwarded raw. Allowed characters are letters, digits and `. _ + @ ( ) -`, up to 128. Have the build or release script copy the merged map using the same release string the app sends to Sentry.
+
+If a map file is replaced on disk, the proxy notices the changed last-write time on the next event for that release and reloads it, so no restart is needed.
+
+Two methods of one type can share an obfuscated name in a merged map. The proxy then resolves to the first entry without any warning, so such a frame can be mislabeled. See issue 13 in [`docs/ISSUES-AND-TODO.md`](docs/ISSUES-AND-TODO.md).
 
 ## `.nrmap` format
 
@@ -89,10 +100,10 @@ Never commit a real `.nrmap` file — it maps your actual obfuscated build back 
 
 ## Endpoints
 
-- `POST /api/{projectId}/envelope/{**catchall}` — the main proxy path, requires `Authorization: Bearer <ApiKey>`.
+- `POST /api/{projectId}/envelope/{**catchall}` — the main proxy path, requires `Authorization: Bearer <ApiKey>`, or the DSN public key (`sentry_key`) when `Authentication:ClientKey` is set.
 - `GET /api/{projectId}/mappings` — cache occupancy (how many tenants are currently cached); per-tenant hit/miss/unresolved counts live at `/metrics` instead (no auth, no sensitive data).
 - `GET /api/{projectId}/health` — health check + cache occupancy.
-- `GET /metrics` — Prometheus exposition format: `deobfuscator_resolution_duration_seconds`, `deobfuscator_cache_hit_total`, `deobfuscator_cache_miss_total`, `deobfuscator_unresolved_total`, `deobfuscator_resolution_errors_total` (see Project.md §3.5).
+- `GET /metrics` — Prometheus exposition format: `deobfuscator_resolution_duration_seconds`, `deobfuscator_cache_hit_total`, `deobfuscator_cache_miss_total`, `deobfuscator_unresolved_total`, `deobfuscator_resolution_errors_total`, and `deobfuscator_frames_total{product,result}` where `result` is `resolved`, `unmatched` or `skipped` (see Project.md §3.5). A rising `unmatched` count after a release usually means a missing or stale map.
 - `/swagger` (Development environment only) — interactive API explorer.
 
 ## Testing
@@ -101,9 +112,11 @@ Never commit a real `.nrmap` file — it maps your actual obfuscated build back 
 dotnet test "Sentry Crashes Deobfuscator.sln"
 ```
 
-Covers `.nrmap` parsing (`NRMapRepository`), tenant-key resolution (`TenantKeyResolver` — missing product/release, both tag shapes Sentry has shipped), the blob store (`LocalDiskNrmapBlobStore`), the LRU+TTL cache (`TenantMappingCache` — cache hits return the same instance, distinct tenants resolve independently), and `SentryDeobfuscationService`'s frame-resolution logic including both fallback paths (no resolvable tenant key, and a resolved tenant with no stored mapping).
+Covers `.nrmap` parsing (`NRMapRepository`), tenant-key resolution (`TenantKeyResolver` — missing product/release, both tag shapes Sentry has shipped), the blob store (`LocalDiskNrmapBlobStore`), the LRU+TTL cache (`TenantMappingCache` — cache hits return the same instance, distinct tenants resolve independently, a changed map file is reloaded), the client-key authentication, and `SentryDeobfuscationService`'s frame-resolution logic including lambda frames, per-outcome frame counts and both fallback paths (no resolvable tenant key, and a resolved tenant with no stored mapping).
 
-Not covered by an automated test: the cache's eviction-at-capacity behavior (`Cache:NrmapMaxEntries`) — `MemoryCache`'s exact compaction timing wasn't something I could verify without a local build (no .NET SDK on the machine this was built on; GitHub Actions CI is the real gate). The cap is wired per ADR-001; only its precise eviction timing is unverified.
+Not covered by an automated test: the cache's eviction-at-capacity behavior (`Cache:NrmapMaxEntries`). The cap is wired per ADR-001; only its precise eviction timing is unverified.
+
+Known issues and the TODO list are in [`docs/ISSUES-AND-TODO.md`](docs/ISSUES-AND-TODO.md).
 
 ## License
 
