@@ -116,6 +116,8 @@ Covers `.nrmap` parsing (`NRMapRepository`), tenant-key resolution (`TenantKeyRe
 
 Not covered by an automated test: the cache's eviction-at-capacity behavior (`Cache:NrmapMaxEntries`). The cap is wired per ADR-001; only its precise eviction timing is unverified.
 
+A separate load-test tool lives in [`tools/LoadTest`](tools/LoadTest/README.md). It is not part of the solution or CI.
+
 Known issues and the TODO list are in [`docs/ISSUES-AND-TODO.md`](docs/ISSUES-AND-TODO.md).
 
 ## License

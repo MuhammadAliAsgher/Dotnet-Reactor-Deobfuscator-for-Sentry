@@ -37,7 +37,8 @@ Last updated: 2026-11-03. Found while testing the proxy against a test app and a
 
 - Fix issues 1 to 3 first (stampede, shared stats, failed-forward retry or queue).
 - Add per-product ClientKeys (issue 9) before a second app uses the proxy.
-- Repeat the load test on a quiet machine, with a stub that has no artificial delay, and record requests per second, p95 latency, and memory.
+- Repeat the load test on a quiet machine with the tool in `tools/LoadTest` (see its README), and record requests per second, p50/p95/p99 latency, status counts and memory. Try a stub with no artificial delay as well.
+- Make the proxy's forward URL configurable for tests. `tools/LoadTest` needs a temporary local change to point the proxy at its stub, because the earlier `Sentry:UpstreamBaseUrl` override was removed. Decide whether to bring back a test-only override.
 - Fix issue 13 (ambiguous duplicate names) before trusting lambda frames from a merged map.
 - Check the one remaining raw lambda frame in the second real build against its map (issue 13) and note which binary produced each test event.
 - Clean up the local repo: remove the pre-rewrite backup branch (it still holds real maps) and fast-forward local `main` to `origin/main`.
